@@ -8,6 +8,9 @@
 #include <fstream>
 #include <iterator>
 #include <unistd.h>     // for usleep()
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <stdlib.h>
 using namespace std;
  
 //----------------------------
@@ -20,19 +23,21 @@ typedef struct Node
     //  column that node exists
     int c;
     //  tells weather is an endpoint
-    //bool endPt = false;
-    //  number of times reached if it is an end point
-    //int numOfTimesReached = 0;
+    bool isEndPt = false;
 } Node;
 
 typedef struct EndPoint{
     Node node;
-    //  tells weather is an endpoint
-    //bool endPt = false;
     //  number of times reached if it is an end point
     int numOfTimesReached = 0;
 } EndPoint;
- 
+
+typedef struct Skier
+{
+    vector<vector<Node>> routes;
+
+} Skier;
+
 typedef struct Map
 {
     //  num of rows
@@ -41,33 +46,24 @@ typedef struct Map
     int width;
     //  2d vector of the map
     vector<vector<float>> grid;
+    // Each endpoint
     vector<EndPoint> endPoints;
+    //  Number of runs each skier should make
+    int numOfRuns;
+    // all the skiers
+    vector<Skier> skiers;
 } Map;
  
 
-
-
-typedef struct Skier
-{
-    //  rout that the skier has taken
-    vector<Node> route;
-    //  row that the skier is currently on
-    int r;
-    //  column that the skier is currently on
-    int c;
-    //  width of the map
-    int width;
-    //  height of the map
-    int height;
-} Skier;
- 
- 
 //----------------------------
 //  Function prototypes
 //----------------------------
-bool goodNode(int,int,int);
-bool findRoute(Skier skier, vector<vector<float>>);
+bool goodNode(int pRow,int pCol, int height, int width, Node node);
+Node findRoute(Node node,vector<vector<float>> grid,int height,int width);
 void createEndPoint(int row, int col, vector<EndPoint> endPnts);
+void execSkier(Map* map);
+vector<Node> execRun(Map* map);
+void writeToFile(string filePath,Map map);
 //----------------------------
 //  Global variables
 //----------------------------
@@ -78,20 +74,7 @@ void createEndPoint(int row, int col, vector<EndPoint> endPnts);
 #define TRACE_OFF 0
  
  
- 
-//  Our readers abd writers will do a bit of sleep time to simulate actual work
-const int READER_READ_TIME  = 10000;
-const int READER_PROCESSING_TIME = 200000;
-const int WRITER_WRITE_TIME = 10000;
-const int WRITER_PROCESSING_TIME = 200000;
- 
-//  Random generators:  For a uniform distribution
-random_device randDev;
-default_random_engine engine(randDev());
-//uniform_int_distribution<unsigned int> randomArrayIndex(0, ARRAY_SIZE-1);
-uniform_int_distribution<unsigned int> headsOrTails(0, 1);
-uniform_int_distribution<unsigned int> threadType(0, 9);
-uniform_int_distribution<int> randomVal(10, 100);
+
  
  
 int main(int argc, const char* argv[])
@@ -100,17 +83,16 @@ int main(int argc, const char* argv[])
         cout << "usage: ./Version_1 <path/filename.map path/outputfolder 1 1 1>" << endl;
         exit(1);
     }
-
     string mapFilePath = argv[1];
     string outputFolder = argv[2];
     int numOfSkiers = atoi(argv[3]);
-    int numOfRuns = atoi(argv[4]);
+    const int numOfRuns = atoi(argv[4]);
     int traceFlag = atoi(argv[5]);
     Map map;
     ifstream mapFile;
     mapFile.open(mapFilePath);
     mapFile >> map.height >> map.width;
-    
+    map.numOfRuns = numOfRuns;
     for(int r=0; r< map.height ; r++){
         vector<float> temp;
         for(int c = 0; c< map.width; c++){
@@ -120,72 +102,85 @@ int main(int argc, const char* argv[])
         }
         map.grid.push_back(temp);
     }
-    
 
-    for(int i = 0; i< 1; i++){
-        bool ski = true;
-        Skier elton;
-        elton.r = 0;
-        elton.c = 0;
-        while (ski)
-        {
-            ski = findRoute(elton,map.grid);
-            cout << elton.r << endl;
+    vector<pid_t> pIds;
+    for (int i=0; i< numOfSkiers; i++)
+    {
+        cout<< "New Skier +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << endl;
+        pid_t p = fork();
+        if(p==0){
+            execSkier(&map);
         }
-        createEndPoint(elton.r,elton.c,map.endPoints);
-        //cout << elton.r << endl;
     }
 
-   // cout << map.endPoints.at(0).node.r<<endl;
-
+    int statusVal;
+    pid_t termProcess;
+    for (int i=0; i<numOfSkiers; i++)
+    {
+        termProcess = waitpid(-1, &statusVal, 0);
+    }
+    string basePath = mapFilePath.substr(mapFilePath.find_last_of("/\\")+1);
+    string::size_type const p(basePath.find_last_of('.'));
+    string fileName = basePath.substr(0,p);
+    string outFileName = outputFolder.append(fileName.append(".out"));
+    writeToFile(outFileName,map);
     return 0;
 }
 
+void writeToFile(string filePath,Map map){
+    ofstream outFile;
+    outFile.open(filePath);
+    outFile << "Number of Runs: " << map.numOfRuns << "\tNumber of End Points: " << map.endPoints.size()<< endl;
+    for(unsigned int i =0;i< map.endPoints.size(); i++){
+        EndPoint endpt = map.endPoints.at(i);
+        outFile << "End point at row: " << endpt.node.r << " and column: " << endpt.node.c << " was reached " << endpt.numOfTimesReached << " times." << endl;
+    }
+    outFile.close();
+}
 
-bool findRoute(Skier skier, vector<vector<float>> grid){
-    float lowestValue = grid[skier.r][skier.c];
-    bool stop = false;
+
+Node findRoute(Node node,vector<vector<float>> grid,int height,int width){
+    float lowestValue = grid.at(node.r).at(node.c);
     bool newNode = false;
-    // best row
-    int bestRow = skier.r;
-    //  best column
-    int bestCol = skier.c;
+    int bestRow = node.r;
+    int bestCol = node.c;
     for (int r = 0; r < 3; r++)
     {
         //  potential row
-        int pRow = skier.r + (r-1);
-        if(!goodNode(pRow,skier.r, skier.height)){
-            continue;
-        }
+        int pRow = node.r + (r-1);
         for(int c = 0; c<3; c++){
             //  potential column
-            int pCol = skier.c + (c-1);
-            if(!goodNode(pCol,skier.c, skier.width)){
+            int pCol = node.c + (c-1);
+            if(!goodNode(pRow,pCol,height,width,node)){
                 continue;
             }
-            if(grid.at(r).at(c) <= lowestValue){
-                lowestValue = grid.at(r).at(c);
-                bestCol = c;
-                bestRow = r;
+ 
+            if(grid.at(pRow).at(pCol) <= lowestValue){
+                lowestValue = grid.at(pRow).at(pCol);
+                bestCol = pCol;
+                bestRow = pRow;
                 newNode = true;
             }
         }
     }
     if (newNode){
-        Node node;
-        node.c = bestCol;
-        node.r = bestRow;
+        Node newNode;
+        newNode.c = bestCol;
+        newNode.r = bestRow;
+        return newNode;
+    }else{
+        node.isEndPt =true;
+        return node;
     }
-    skier.r = bestRow;
-    skier.c = bestCol;
-    return stop;
 }
 
 
-bool goodNode(int potentialRorC, int skierRorC,int mapHorW){
-    if(potentialRorC == skierRorC){
+bool goodNode(int pRow,int pCol, int height, int width, Node node){
+    if((pRow == node.r) && (pCol && node.c)){
         return false;
-    }else if((potentialRorC >= mapHorW) || (potentialRorC < 0)){
+    }else if((pRow >= height) || (pCol >= width)){
+        return false;
+    }else if((pRow < 0) || (pCol < 0)){
         return false;
     }else{
         return true;
@@ -195,7 +190,7 @@ bool goodNode(int potentialRorC, int skierRorC,int mapHorW){
 
 void createEndPoint(int row, int col, vector<EndPoint> endPnts){
     bool isNew =true;
-    for(int i= 0;i< endPnts.size();i++){
+    for(unsigned int i= 0;i< endPnts.size();i++){
         if((endPnts.at(i).node.c == col) || (endPnts.at(i).node.r == row)){
             endPnts.at(i).numOfTimesReached++;
             isNew = false;
@@ -209,6 +204,75 @@ void createEndPoint(int row, int col, vector<EndPoint> endPnts){
         endPnts.push_back(newEndpt);
     }
 }
+
+void execSkier(Map* map){
+    srand(time(NULL)+getpid());
+    Skier skier;
+    for(int i =0; i< map->numOfRuns;i++){
+        cout << "new run**********************************************"<<endl;
+        skier.routes.push_back(execRun(map));
+    }
+    map->skiers.push_back(skier);
+    exit(0);
+}
+
+vector<Node> execRun(Map* map){
+    vector<Node> route;
+    Node start;
+    start.r = rand()% (map->height -1);
+    start.c = 1 + rand()% (map->width -1);
+    route.push_back(start);
+    bool ski =true;
+    while(ski){
+        Node node = findRoute(route.at(route.size()-1),map->grid,map->height,map->width);
+        ski = !node.isEndPt;
+        if(!node.isEndPt){
+            route.push_back(node);
+        }else{
+            createEndPoint(node.r,node.c,map->endPoints);
+        }
+        cout << "AFter Find Route =============================" << endl;
+        cout << "r: " << node.r << ", c: " << node.c << endl;
+        cout << "val: " << map->grid.at(node.r).at(node.c)<< endl;
+    }
+    return route;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
    /*
